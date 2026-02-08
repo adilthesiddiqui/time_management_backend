@@ -90,100 +90,131 @@ async def login(user_req: UserLoginModel):
     return TokenResponse(access_token=access_token)
 
 
+from fastapi import HTTPException, Depends
+from db.databse import get_connection
 
 
 @app.get("/tasks")
 def get_tasks(user_id: int = Depends(get_current_user_id)):
     conn = get_connection()
-    tasks = conn.execute(
-        "SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC",
-        (user_id,)
-    ).fetchall()
-    conn.close()
-
-    return [dict(t) for t in tasks]
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM tasks WHERE user_id = %s ORDER BY created_at DESC",
+            (user_id,)
+        )
+        tasks = cur.fetchall()
+        return tasks
+    finally:
+        cur.close()
+        conn.close()
 
 
 @app.get("/tasks/{task_id}")
 def get_task(task_id: int, user_id: int = Depends(get_current_user_id)):
     conn = get_connection()
-    task = conn.execute(
-        "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
-        (task_id, user_id)
-    ).fetchone()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM tasks WHERE id = %s AND user_id = %s",
+            (task_id, user_id)
+        )
+        task = cur.fetchone()
 
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    return dict(task)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        return task
+    finally:
+        cur.close()
+        conn.close()
 
 
 @app.post("/tasks")
 def create_task(task: TaskCreateModel, user_id: int = Depends(get_current_user_id)):
     conn = get_connection()
     try:
-        cursor = conn.execute(
-            "INSERT INTO tasks (title, description, user_id, is_completed) VALUES (?, ?, ?, ?)",
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO tasks (title, description, user_id, is_completed)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
             (task.title, task.description, user_id, task.is_completed)
         )
+        task_id = cur.fetchone()["id"]
         conn.commit()
-        task_id = cursor.lastrowid
-        
-        # Fetch the created task
-        created_task = conn.execute(
-            "SELECT * FROM tasks WHERE id = ?",
+
+        # Fetch created task
+        cur.execute(
+            "SELECT * FROM tasks WHERE id = %s",
             (task_id,)
-        ).fetchone()
-        return dict(created_task)
+        )
+        created_task = cur.fetchone()
+        return created_task
     finally:
+        cur.close()
         conn.close()
 
 
 @app.put("/tasks/{task_id}")
-def update_task(task_id: int, task: TaskUpdateModel, user_id: int = Depends(get_current_user_id)):
+def update_task(
+    task_id: int,
+    task: TaskUpdateModel,
+    user_id: int = Depends(get_current_user_id)
+):
     conn = get_connection()
     try:
-        # Check if task exists and belongs to user
-        existing = conn.execute(
-            "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
+        cur = conn.cursor()
+
+        # Check ownership
+        cur.execute(
+            "SELECT * FROM tasks WHERE id = %s AND user_id = %s",
             (task_id, user_id)
-        ).fetchone()
-        
+        )
+        existing = cur.fetchone()
+
         if not existing:
             raise HTTPException(status_code=404, detail="Task not found")
-        
-        # Build update query dynamically based on provided fields
+
         updates = []
         values = []
-        
+
         if task.title is not None:
-            updates.append("title = ?")
+            updates.append("title = %s")
             values.append(task.title)
+
         if task.description is not None:
-            updates.append("description = ?")
+            updates.append("description = %s")
             values.append(task.description)
+
         if task.is_completed is not None:
-            updates.append("is_completed = ?")
+            updates.append("is_completed = %s")
             values.append(task.is_completed)
-        
+
         if not updates:
-            # No updates provided, return existing task
-            return dict(existing)
-        
+            return existing
+
         values.extend([task_id, user_id])
-        query = f"UPDATE tasks SET {', '.join(updates)} WHERE id = ? AND user_id = ?"
-        
-        conn.execute(query, values)
+
+        query = f"""
+            UPDATE tasks
+            SET {', '.join(updates)}
+            WHERE id = %s AND user_id = %s
+        """
+
+        cur.execute(query, tuple(values))
         conn.commit()
-        
-        # Fetch updated task
-        updated_task = conn.execute(
-            "SELECT * FROM tasks WHERE id = ?",
+
+        cur.execute(
+            "SELECT * FROM tasks WHERE id = %s",
             (task_id,)
-        ).fetchone()
-        return dict(updated_task)
+        )
+        updated_task = cur.fetchone()
+        return updated_task
     finally:
+        cur.close()
         conn.close()
 
 
@@ -191,21 +222,22 @@ def update_task(task_id: int, task: TaskUpdateModel, user_id: int = Depends(get_
 def delete_task(task_id: int, user_id: int = Depends(get_current_user_id)):
     conn = get_connection()
     try:
-        # Check if task exists and belongs to user
-        existing = conn.execute(
-            "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT id FROM tasks WHERE id = %s AND user_id = %s",
             (task_id, user_id)
-        ).fetchone()
-        
-        if not existing:
+        )
+        if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Task not found")
-        
-        conn.execute(
-            "DELETE FROM tasks WHERE id = ? AND user_id = ?",
+
+        cur.execute(
+            "DELETE FROM tasks WHERE id = %s AND user_id = %s",
             (task_id, user_id)
         )
         conn.commit()
+
         return {"message": "Task deleted successfully"}
     finally:
+        cur.close()
         conn.close()
-
